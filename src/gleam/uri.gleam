@@ -639,8 +639,8 @@ pub fn to_string(uri: Uri) -> String {
   }
 
   let out = case uri.host {
-    // Host is mandatory if this is present, so we ignore any port and userinfo
-    // if it is not as they would be invalid.
+    // Host is mandatory if this is present, so if it is absent we ignore any
+    // `port` and `userinfo` as they would be invalid.
     None -> {
       out <> uri.path
     }
