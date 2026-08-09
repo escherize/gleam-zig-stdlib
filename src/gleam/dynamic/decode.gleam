@@ -1058,13 +1058,15 @@ pub fn failure(placeholder: a, expected name: String) -> Decoder(a) {
 /// built-in `Int` decoder) you would define it like so:
 ///
 /// ```gleam
-/// pub fn int_decoder() -> decode.Decoder(Int) {
-///   let default = ""
+/// import gleam/dynamic.{type Dynamic}
+/// import gleam/dynamic/decode.{type Decoder}
+///
+/// pub fn int_decoder() -> Decoder(Int) {
 ///   decode.new_primitive_decoder("Int", int_from_dynamic)
 /// }
 ///
 /// @external(erlang, "my_module", "int_from_dynamic")
-/// fn int_from_dynamic(data: Int) -> Result(Int, Int)
+/// fn int_from_dynamic(data: Dynamic) -> Result(Int, Int)
 /// ```
 ///
 /// ```erlang
