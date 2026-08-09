@@ -758,7 +758,7 @@ fn decode_dynamic(data: Dynamic) -> #(Dynamic, List(DecodeError)) {
   #(data, [])
 }
 
-/// A decoder that decodes `BitArray` values. This decoder never returns an error.
+/// A decoder that decodes `BitArray` values.
 ///
 /// ## Examples
 ///
