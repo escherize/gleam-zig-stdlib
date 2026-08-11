@@ -342,9 +342,12 @@ pub fn split(x: String, on substring: String) -> List(String) {
   }
 }
 
-/// Splits a `String` a single time on the given substring.
+/// Splits a `String` a single time on the given substring,
+/// returning an `Error` if substring not present.
 ///
-/// Returns an `Error` if substring not present.
+/// This function is fast and is ideal for writing string parsers.
+/// If you want to split on multiple possible substrings then check out the
+/// [splitter package](https://hex.pm/packages/splitter).
 ///
 /// ## Examples
 ///
@@ -597,9 +600,8 @@ pub fn trim_end(string: String) -> String {
 ///
 /// ## Performance
 ///
-/// There is a notable overhead to using this function, so you may not want to
-/// use it in a tight loop. If you wish to efficiently parse a string you may
-/// want to use alternatives such as the [splitter package](https://hex.pm/packages/splitter).
+/// This function is slow, so for parsing strings you should use alternatives
+/// such as the string pattern matching, `split_once`, and the [splitter package](https://hex.pm/packages/splitter).
 ///
 /// ## Examples
 ///
@@ -617,6 +619,9 @@ pub fn pop_grapheme(string: String) -> Result(#(String, String), Nil)
 
 /// Converts a `String` to a list of
 /// [graphemes](https://en.wikipedia.org/wiki/Grapheme).
+///
+/// This function is slow, so for parsing strings you should use alternatives
+/// such as the string pattern matching, `split_once`, and the [splitter package](https://hex.pm/packages/splitter).
 ///
 /// ```gleam
 /// assert string.to_graphemes("abc") == ["a", "b", "c"]
