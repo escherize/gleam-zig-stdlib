@@ -549,3 +549,102 @@ pub fn dict_transient_update_with(key: Value, fun: Value, init: Value, dict: Val
     }
     return dictPut(dict, key, init);
 }
+
+// ------------------------------------------------------------------ bit_array
+
+pub fn ba_from_string(string: Value) Value {
+    return P.copyBitArray(string.string);
+}
+
+pub fn ba_bit_size(bits: Value) Value {
+    return P.intValue(@intCast(bits.bit_array.bytes().len * 8));
+}
+
+pub fn ba_byte_size(bits: Value) Value {
+    return P.intValue(@intCast(bits.bit_array.bytes().len));
+}
+
+pub fn ba_unsafe_to_string(bits: Value) Value {
+    return P.copyString(bits.bit_array.bytes());
+}
+
+pub fn ba_to_string(bits: Value) Value {
+    const view = bits.bit_array.bytes();
+    if (!std.unicode.utf8ValidateSlice(view)) return err(P.NIL);
+    return ok(P.copyString(view));
+}
+
+/// Negative length slices backwards from position.
+pub fn ba_slice(bits: Value, position: Value, count: Value) Value {
+    const view = bits.bit_array.bytes();
+    const size: i64 = @intCast(view.len);
+    const p = position.int;
+    const l = count.int;
+    const start = if (l < 0) p + l else p;
+    const end = if (l < 0) p else p + l;
+    if (start < 0 or end > size or start > end) return err(P.NIL);
+    return ok(P.copyBitArray(view[@intCast(start)..@intCast(end)]));
+}
+
+pub fn ba_concat(bit_arrays: Value) Value {
+    var aw = std.Io.Writer.Allocating.init(scratch);
+    defer aw.deinit();
+    var cell = bit_arrays.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        aw.writer.writeAll(cell.?.head.bit_array.bytes()) catch @panic("out of memory");
+    }
+    return P.copyBitArray(aw.written());
+}
+
+pub fn ba_base64_encode(input: Value, padding: Value) Value {
+    const view = input.bit_array.bytes();
+    const encoder = if (padding.bool)
+        std.base64.standard.Encoder
+    else
+        std.base64.standard_no_pad.Encoder;
+    const size = encoder.calcSize(view.len);
+    const buffer = scratch.alloc(u8, size) catch @panic("out of memory");
+    defer scratch.free(buffer);
+    return P.copyString(encoder.encode(buffer, view));
+}
+
+pub fn ba_base64_decode(encoded: Value) Value {
+    const text = encoded.string;
+    const decoder = if (std.mem.endsWith(u8, text, "="))
+        std.base64.standard.Decoder
+    else
+        std.base64.standard_no_pad.Decoder;
+    const size = decoder.calcSizeForSlice(text) catch return err(P.NIL);
+    const buffer = scratch.alloc(u8, size) catch @panic("out of memory");
+    defer scratch.free(buffer);
+    decoder.decode(buffer, text) catch return err(P.NIL);
+    return ok(P.copyBitArray(buffer));
+}
+
+pub fn ba_base16_encode(input: Value) Value {
+    const digits = "0123456789ABCDEF";
+    const view = input.bit_array.bytes();
+    const buffer = scratch.alloc(u8, view.len * 2) catch @panic("out of memory");
+    defer scratch.free(buffer);
+    for (view, 0..) |byte, index| {
+        buffer[index * 2] = digits[byte >> 4];
+        buffer[index * 2 + 1] = digits[byte & 0x0F];
+    }
+    return P.copyString(buffer);
+}
+
+pub fn ba_base16_decode(input: Value) Value {
+    const text = input.string;
+    if (text.len % 2 != 0) return err(P.NIL);
+    const buffer = scratch.alloc(u8, text.len / 2) catch @panic("out of memory");
+    defer scratch.free(buffer);
+    for (0..buffer.len) |index| {
+        buffer[index] = std.fmt.parseInt(u8, text[index * 2 .. index * 2 + 2], 16) catch
+            return err(P.NIL);
+    }
+    return ok(P.copyBitArray(buffer));
+}
+
+pub fn ba_starts_with(bits: Value, prefix: Value) Value {
+    return P.boolValue(std.mem.startsWith(u8, bits.bit_array.bytes(), prefix.bit_array.bytes()));
+}
