@@ -58,6 +58,7 @@ pub fn prepend_tree(
 ///
 @external(erlang, "gleam_stdlib", "iodata_append")
 @external(javascript, "../gleam_stdlib.mjs", "add")
+@external(zig, "../gleam_stdlib.zig", "add")
 pub fn append_tree(to tree: StringTree, suffix suffix: StringTree) -> StringTree
 
 /// Converts a list of strings into a `StringTree`.
@@ -66,6 +67,7 @@ pub fn append_tree(to tree: StringTree, suffix suffix: StringTree) -> StringTree
 ///
 @external(erlang, "gleam_stdlib", "identity")
 @external(javascript, "../gleam_stdlib.mjs", "concat")
+@external(zig, "../gleam_stdlib.zig", "concat")
 pub fn from_strings(strings: List(String)) -> StringTree
 
 /// Joins a list of trees into a single tree.
@@ -74,6 +76,7 @@ pub fn from_strings(strings: List(String)) -> StringTree
 ///
 @external(erlang, "gleam_stdlib", "identity")
 @external(javascript, "../gleam_stdlib.mjs", "concat")
+@external(zig, "../gleam_stdlib.zig", "concat")
 pub fn concat(trees: List(StringTree)) -> StringTree
 
 /// Converts a string into a `StringTree`.
@@ -82,6 +85,7 @@ pub fn concat(trees: List(StringTree)) -> StringTree
 ///
 @external(erlang, "gleam_stdlib", "identity")
 @external(javascript, "../gleam_stdlib.mjs", "identity")
+@external(zig, "../gleam_stdlib.zig", "identity")
 pub fn from_string(string: String) -> StringTree
 
 /// Turns a `StringTree` into a `String`.
@@ -91,12 +95,14 @@ pub fn from_string(string: String) -> StringTree
 ///
 @external(erlang, "unicode", "characters_to_binary")
 @external(javascript, "../gleam_stdlib.mjs", "identity")
+@external(zig, "../gleam_stdlib.zig", "identity")
 pub fn to_string(tree: StringTree) -> String
 
 /// Returns the size of the `StringTree` in bytes.
 ///
 @external(erlang, "erlang", "iolist_size")
 @external(javascript, "../gleam_stdlib.mjs", "length")
+@external(zig, "../gleam_stdlib.zig", "length")
 pub fn byte_size(tree: StringTree) -> Int
 
 /// Joins the given trees into a new tree separated with the given string.
@@ -112,6 +118,7 @@ pub fn join(trees: List(StringTree), with sep: String) -> StringTree {
 ///
 @external(erlang, "string", "lowercase")
 @external(javascript, "../gleam_stdlib.mjs", "lowercase")
+@external(zig, "../gleam_stdlib.zig", "lowercase")
 pub fn lowercase(tree: StringTree) -> StringTree
 
 /// Converts a `StringTree` to a new one where the contents have been
@@ -119,6 +126,7 @@ pub fn lowercase(tree: StringTree) -> StringTree
 ///
 @external(erlang, "string", "uppercase")
 @external(javascript, "../gleam_stdlib.mjs", "uppercase")
+@external(zig, "../gleam_stdlib.zig", "uppercase")
 pub fn uppercase(tree: StringTree) -> StringTree
 
 /// Converts a `StringTree` to a new one with the contents reversed.
@@ -133,6 +141,7 @@ pub fn reverse(tree: StringTree) -> StringTree {
 }
 
 @external(javascript, "../gleam_stdlib.mjs", "graphemes")
+@external(zig, "../gleam_stdlib.zig", "graphemes")
 fn do_to_graphemes(string: String) -> List(String)
 
 type Direction {
@@ -142,6 +151,7 @@ type Direction {
 /// Splits a `StringTree` on a given pattern into a list of trees.
 ///
 @external(javascript, "../gleam_stdlib.mjs", "split")
+@external(zig, "../gleam_stdlib.zig", "split")
 pub fn split(tree: StringTree, on pattern: String) -> List(StringTree) {
   erl_split(tree, pattern, All)
 }
@@ -153,6 +163,7 @@ fn erl_split(a: StringTree, b: String, c: Direction) -> List(StringTree)
 ///
 @external(erlang, "gleam_stdlib", "string_replace")
 @external(javascript, "../gleam_stdlib.mjs", "string_replace")
+@external(zig, "../gleam_stdlib.zig", "string_replace")
 pub fn replace(
   in tree: StringTree,
   each pattern: String,

@@ -11,6 +11,7 @@
 ///
 @external(erlang, "gleam_stdlib", "print")
 @external(javascript, "../gleam_stdlib.mjs", "print")
+@external(zig, "../gleam_stdlib.zig", "print")
 pub fn print(string: String) -> Nil
 
 /// Writes a string to standard error (stderr).
@@ -26,6 +27,7 @@ pub fn print(string: String) -> Nil
 ///
 @external(erlang, "gleam_stdlib", "print_error")
 @external(javascript, "../gleam_stdlib.mjs", "print_error")
+@external(zig, "../gleam_stdlib.zig", "print_error")
 pub fn print_error(string: String) -> Nil
 
 /// Writes a string to standard output (stdout), appending a newline to the end.
@@ -39,6 +41,7 @@ pub fn print_error(string: String) -> Nil
 ///
 @external(erlang, "gleam_stdlib", "println")
 @external(javascript, "../gleam_stdlib.mjs", "console_log")
+@external(zig, "../gleam_stdlib.zig", "console_log")
 pub fn println(string: String) -> Nil
 
 /// Writes a string to standard error (stderr), appending a newline to the end.
@@ -52,4 +55,5 @@ pub fn println(string: String) -> Nil
 ///
 @external(erlang, "gleam_stdlib", "println_error")
 @external(javascript, "../gleam_stdlib.mjs", "console_error")
+@external(zig, "../gleam_stdlib.zig", "console_error")
 pub fn println_error(string: String) -> Nil

@@ -92,6 +92,13 @@ fn is_utf8_loop(bits: BitArray) -> Bool {
   }
 }
 
+@target(zig)
+fn is_utf8_loop(bits: BitArray) -> Bool {
+  case bits {
+    _ -> panic as "BitArray is not yet supported on the zig target"
+  }
+}
+
 /// Converts a bit array to a string.
 ///
 /// Returns an error if the bit array is invalid UTF-8 data.
