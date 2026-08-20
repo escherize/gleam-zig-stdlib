@@ -291,7 +291,7 @@ pub fn to_precision(x: Float, precision: Int) -> Float {
 
 @external(erlang, "erlang", "float")
 @external(javascript, "../gleam_stdlib.mjs", "identity")
-@external(zig, "../gleam_stdlib.zig", "identity")
+@external(zig, "../gleam_stdlib.zig", "int_to_float")
 fn do_to_float(a: Int) -> Float
 
 /// Returns the absolute value of the input as a `Float`.

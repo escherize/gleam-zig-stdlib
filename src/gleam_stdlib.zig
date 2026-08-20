@@ -61,6 +61,10 @@ pub fn identity(value: Value) Value {
     return value;
 }
 
+pub fn int_to_float(x: Value) Value {
+    return P.floatValue(@floatFromInt(x.int));
+}
+
 pub fn parse_int(string: Value) Value {
     const s = string.string;
     if (!isStrictInt(s)) return err(P.NIL);
@@ -180,8 +184,17 @@ pub fn power(base: Value, exponent: Value) Value {
     return P.floatValue(std.math.pow(f64, base.float, exponent.float));
 }
 
+// ponytail: time-seeded xoshiro, not crypto-grade; swap for an OS entropy
+// source if anything security-adjacent ever uses float.random.
+var prng: ?std.Random.DefaultPrng = null;
+
 pub fn random_uniform() Value {
-    return P.floatValue(std.crypto.random.float(f64));
+    if (prng == null) {
+        const now = std.Io.Clock.now(.awake, io_threaded.io());
+        const seed: u64 = @truncate(@as(u96, @bitCast(now.nanoseconds)));
+        prng = std.Random.DefaultPrng.init(seed ^ @intFromPtr(&prng));
+    }
+    return P.floatValue(prng.?.random().float(f64));
 }
 
 pub fn log(x: Value) Value {
@@ -408,4 +421,112 @@ pub fn string_replace(string: Value, pattern: Value, replacement: Value) Value {
         replacement.string,
     ) catch @panic("out of memory");
     return P.stringValue(replaced);
+}
+
+// ------------------------------------------------------------------ dict
+// ponytail: Dict is an insertion-ordered association list (a Value.list of
+// #(key, value) tuples). O(n) operations; swap for a hash map when a real
+// workload notices. "Transient" variants return fresh copies.
+
+pub fn dict_identity(dict: Value) Value {
+    return dict;
+}
+
+pub fn dict_make() Value {
+    return P.emptyList();
+}
+
+pub fn dict_size(dict: Value) Value {
+    var count: i64 = 0;
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) count += 1;
+    return P.intValue(count);
+}
+
+pub fn dict_has(dict: Value, key: Value) Value {
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        if (P.isEqual(cell.?.head.tuple[0], key)) return P.TRUE;
+    }
+    return P.FALSE;
+}
+
+pub fn dict_get(dict: Value, key: Value) Value {
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        if (P.isEqual(cell.?.head.tuple[0], key)) return ok(cell.?.head.tuple[1]);
+    }
+    return err(P.NIL);
+}
+
+/// Copy the dict, replacing `key` if present (keeping its position) or
+/// appending the new entry at the end.
+fn dictPut(dict: Value, key: Value, value: Value) Value {
+    var items: std.ArrayList(Value) = .empty;
+    var replaced = false;
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        if (P.isEqual(cell.?.head.tuple[0], key)) {
+            items.append(allocator, P.tupleValue(&[_]Value{ key, value })) catch
+                @panic("out of memory");
+            replaced = true;
+        } else {
+            items.append(allocator, cell.?.head) catch @panic("out of memory");
+        }
+    }
+    if (!replaced) {
+        items.append(allocator, P.tupleValue(&[_]Value{ key, value })) catch
+            @panic("out of memory");
+    }
+    return P.listFromSlice(items.items, P.emptyList());
+}
+
+pub fn dict_insert(dict: Value, key: Value, value: Value) Value {
+    return dictPut(dict, key, value);
+}
+
+pub fn dict_transient_insert(key: Value, value: Value, dict: Value) Value {
+    return dictPut(dict, key, value);
+}
+
+pub fn dict_map(dict: Value, fun: Value) Value {
+    var items: std.ArrayList(Value) = .empty;
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        const key = cell.?.head.tuple[0];
+        const mapped = P.call2(fun, key, cell.?.head.tuple[1]);
+        items.append(allocator, P.tupleValue(&[_]Value{ key, mapped })) catch
+            @panic("out of memory");
+    }
+    return P.listFromSlice(items.items, P.emptyList());
+}
+
+pub fn dict_transient_delete(key: Value, dict: Value) Value {
+    var items: std.ArrayList(Value) = .empty;
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        if (!P.isEqual(cell.?.head.tuple[0], key)) {
+            items.append(allocator, cell.?.head) catch @panic("out of memory");
+        }
+    }
+    return P.listFromSlice(items.items, P.emptyList());
+}
+
+pub fn dict_fold(dict: Value, initial: Value, fun: Value) Value {
+    var accumulator = initial;
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        accumulator = P.call3(fun, accumulator, cell.?.head.tuple[0], cell.?.head.tuple[1]);
+    }
+    return accumulator;
+}
+
+pub fn dict_transient_update_with(key: Value, fun: Value, init: Value, dict: Value) Value {
+    var cell = dict.list;
+    while (cell != null) : (cell = cell.?.tail) {
+        if (P.isEqual(cell.?.head.tuple[0], key)) {
+            return dictPut(dict, key, P.call1(fun, cell.?.head.tuple[1]));
+        }
+    }
+    return dictPut(dict, key, init);
 }
