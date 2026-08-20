@@ -1,3 +1,12 @@
+> [!IMPORTANT]
+> **This is an unofficial fork of gleam_stdlib adding FFI for the
+> [zig compilation target](https://github.com/escherize/gleam-zig).**
+> Not affiliated with the Gleam core team, and not the hex package —
+> use it as a path dependency alongside the fork. The zig FFI lives in
+> `src/gleam_stdlib.zig` under a borrowed-in/owned-out reference-counting
+> convention. For the real stdlib, go to
+> [github.com/gleam-lang/stdlib](https://github.com/gleam-lang/stdlib).
+
 # stdlib
 
 [![Package Version](https://img.shields.io/hexpm/v/gleam_stdlib)](https://hex.pm/packages/gleam_stdlib)
