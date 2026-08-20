@@ -1,8 +1,8 @@
 // Zig FFI implementations for gleam_stdlib.
 //
-// Convention: one Value parameter per Gleam argument, returning Value.
-// Values are borrowed in and owned out; everything leaks for now (the
-// compiler's Perceus pass will manage memory later).
+// Ownership convention: FFI functions receive BORROWED values and return
+// OWNED values. Anything a result retains from an argument is dup'd;
+// scratch buffers use the untracked page allocator and are freed here.
 //
 // ponytail: "grapheme" functions segment by codepoint, not UAX#29 grapheme
 // cluster; lowercase/uppercase/trim are ASCII-only. Upgrade with a proper
@@ -12,7 +12,7 @@ const std = @import("std");
 const P = @import("../prelude.zig");
 const Value = P.Value;
 
-const allocator = P.allocator;
+const scratch = P.allocator;
 
 fn ok(value: Value) Value {
     return P.makeRecord("Ok", &[_]Value{value});
@@ -58,7 +58,7 @@ fn doPrint(text: []const u8, newline: bool, to_stderr: bool) void {
 // ------------------------------------------------------------------ int
 
 pub fn identity(value: Value) Value {
-    return value;
+    return P.dup(value);
 }
 
 pub fn int_to_float(x: Value) Value {
@@ -90,8 +90,9 @@ pub fn int_from_base_string(string: Value, base: Value) Value {
 }
 
 pub fn to_string(x: Value) Value {
-    const text = std.fmt.allocPrint(allocator, "{d}", .{x.int}) catch @panic("out of memory");
-    return P.stringValue(text);
+    const text = std.fmt.allocPrint(scratch, "{d}", .{x.int}) catch @panic("out of memory");
+    defer scratch.free(text);
+    return P.copyString(text);
 }
 
 pub fn int_to_base_string(x: Value, base: Value) Value {
@@ -114,8 +115,7 @@ pub fn int_to_base_string(x: Value, base: Value) Value {
         index -= 1;
         buffer[index] = '-';
     }
-    const text = allocator.dupe(u8, buffer[index..]) catch @panic("out of memory");
-    return P.stringValue(text);
+    return P.copyString(buffer[index..]);
 }
 
 pub fn bitwise_and(x: Value, y: Value) Value {
@@ -158,10 +158,11 @@ pub fn parse_float(string: Value) Value {
 pub fn float_to_string(x: Value) Value {
     const f = x.float;
     const text = if (f == @trunc(f) and !std.math.isInf(f) and !std.math.isNan(f))
-        std.fmt.allocPrint(allocator, "{d}.0", .{f}) catch @panic("out of memory")
+        std.fmt.allocPrint(scratch, "{d}.0", .{f}) catch @panic("out of memory")
     else
-        std.fmt.allocPrint(allocator, "{d}", .{f}) catch @panic("out of memory");
-    return P.stringValue(text);
+        std.fmt.allocPrint(scratch, "{d}", .{f}) catch @panic("out of memory");
+    defer scratch.free(text);
+    return P.copyString(text);
 }
 
 pub fn ceiling(x: Value) Value {
@@ -226,15 +227,15 @@ pub fn byte_size(string: Value) Value {
 }
 
 pub fn lowercase(string: Value) Value {
-    const out = allocator.dupe(u8, string.string) catch @panic("out of memory");
-    for (out) |*c| c.* = std.ascii.toLower(c.*);
-    return P.stringValue(out);
+    const out = P.copyString(string.string);
+    for (@constCast(out.string)) |*c| c.* = std.ascii.toLower(c.*);
+    return out;
 }
 
 pub fn uppercase(string: Value) Value {
-    const out = allocator.dupe(u8, string.string) catch @panic("out of memory");
-    for (out) |*c| c.* = std.ascii.toUpper(c.*);
-    return P.stringValue(out);
+    const out = P.copyString(string.string);
+    for (@constCast(out.string)) |*c| c.* = std.ascii.toUpper(c.*);
+    return out;
 }
 
 pub fn less_than(a: Value, b: Value) Value {
@@ -255,10 +256,10 @@ fn codepointOffset(s: []const u8, index: i64) usize {
 
 pub fn string_grapheme_slice(string: Value, index: Value, count: Value) Value {
     const s = string.string;
-    if (index.int < 0 or count.int <= 0) return P.stringValue("");
+    if (index.int < 0 or count.int <= 0) return P.copyString("");
     const start = codepointOffset(s, index.int);
     const end = codepointOffset(s[start..], count.int) + start;
-    return P.stringValue(s[start..end]);
+    return P.copyString(s[start..end]);
 }
 
 pub fn string_byte_slice(string: Value, index: Value, count: Value) Value {
@@ -266,13 +267,13 @@ pub fn string_byte_slice(string: Value, index: Value, count: Value) Value {
     const start: usize = @intCast(@min(@max(index.int, 0), @as(i64, @intCast(s.len))));
     const wanted: usize = @intCast(@max(count.int, 0));
     const end = @min(start + wanted, s.len);
-    return P.stringValue(s[start..end]);
+    return P.copyString(s[start..end]);
 }
 
 pub fn crop_string(string: Value, substring: Value) Value {
     const position = std.mem.indexOf(u8, string.string, substring.string) orelse
-        return string;
-    return P.stringValue(string.string[position..]);
+        return P.dup(string);
+    return P.copyString(string.string[position..]);
 }
 
 pub fn contains_string(haystack: Value, needle: Value) Value {
@@ -290,37 +291,38 @@ pub fn ends_with(string: Value, suffix: Value) Value {
 pub fn split_once(string: Value, substring: Value) Value {
     const position = std.mem.indexOf(u8, string.string, substring.string) orelse
         return err(P.NIL);
-    const before = P.stringValue(string.string[0..position]);
-    const after = P.stringValue(string.string[position + substring.string.len ..]);
+    const before = P.copyString(string.string[0..position]);
+    const after = P.copyString(string.string[position + substring.string.len ..]);
     return ok(P.tupleValue(&[_]Value{ before, after }));
 }
 
 const whitespace = " \t\n\r";
 
 pub fn trim_start(string: Value) Value {
-    return P.stringValue(std.mem.trimLeft(u8, string.string, whitespace));
+    return P.copyString(std.mem.trimLeft(u8, string.string, whitespace));
 }
 
 pub fn trim_end(string: Value) Value {
-    return P.stringValue(std.mem.trimRight(u8, string.string, whitespace));
+    return P.copyString(std.mem.trimRight(u8, string.string, whitespace));
 }
 
 pub fn pop_grapheme(string: Value) Value {
     const s = string.string;
     if (s.len == 0) return err(P.NIL);
     const first_length = std.unicode.utf8ByteSequenceLength(s[0]) catch 1;
-    const first = P.stringValue(s[0..first_length]);
-    const rest = P.stringValue(s[first_length..]);
+    const first = P.copyString(s[0..first_length]);
+    const rest = P.copyString(s[first_length..]);
     return ok(P.tupleValue(&[_]Value{ first, rest }));
 }
 
 pub fn graphemes(string: Value) Value {
     const s = string.string;
     var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var index: usize = 0;
     while (index < s.len) {
         const step = std.unicode.utf8ByteSequenceLength(s[index]) catch 1;
-        items.append(allocator, P.stringValue(s[index .. index + step])) catch
+        items.append(scratch, P.copyString(s[index .. index + step])) catch
             @panic("out of memory");
         index += step;
     }
@@ -339,15 +341,17 @@ pub fn utf_codepoint_to_int(value: Value) Value {
 pub fn string_to_codepoint_integer_list(string: Value) Value {
     const s = string.string;
     var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var iterator = std.unicode.Utf8Iterator{ .bytes = s, .i = 0 };
     while (iterator.nextCodepoint()) |cp| {
-        items.append(allocator, P.intValue(cp)) catch @panic("out of memory");
+        items.append(scratch, P.intValue(cp)) catch @panic("out of memory");
     }
     return P.listFromSlice(items.items, P.emptyList());
 }
 
 pub fn utf_codepoint_list_to_string(list: Value) Value {
-    var aw = std.Io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(scratch);
+    defer aw.deinit();
     var cell = list.list;
     while (cell != null) {
         var buffer: [4]u8 = undefined;
@@ -355,42 +359,44 @@ pub fn utf_codepoint_list_to_string(list: Value) Value {
         aw.writer.writeAll(buffer[0..encoded]) catch @panic("out of memory");
         cell = cell.?.tail;
     }
-    return P.stringValue(aw.written());
+    return P.copyString(aw.written());
 }
 
 pub fn inspect(term: Value) Value {
-    return P.stringValue(P.inspectValue(term));
+    return P.inspectValue(term);
 }
 
 pub fn string_remove_prefix(string: Value, prefix: Value) Value {
     if (std.mem.startsWith(u8, string.string, prefix.string)) {
-        return P.stringValue(string.string[prefix.string.len..]);
+        return P.copyString(string.string[prefix.string.len..]);
     }
-    return string;
+    return P.dup(string);
 }
 
 pub fn string_remove_suffix(string: Value, suffix: Value) Value {
     if (std.mem.endsWith(u8, string.string, suffix.string)) {
-        return P.stringValue(string.string[0 .. string.string.len - suffix.string.len]);
+        return P.copyString(string.string[0 .. string.string.len - suffix.string.len]);
     }
-    return string;
+    return P.dup(string);
 }
 
 // ------------------------------------------------------------------ string_tree
 // StringTree is represented as a plain string; add/concat copy eagerly.
 
 pub fn add(tree: Value, string: Value) Value {
-    return P.concatenate(tree, string);
+    // concatenate consumes; these are borrowed, so take references first.
+    return P.concatenate(P.dup(tree), P.dup(string));
 }
 
 pub fn concat(trees: Value) Value {
-    var aw = std.Io.Writer.Allocating.init(allocator);
+    var aw = std.Io.Writer.Allocating.init(scratch);
+    defer aw.deinit();
     var cell = trees.list;
     while (cell != null) {
         aw.writer.writeAll(cell.?.head.string) catch @panic("out of memory");
         cell = cell.?.tail;
     }
-    return P.stringValue(aw.written());
+    return P.copyString(aw.written());
 }
 
 pub fn length(tree: Value) Value {
@@ -400,27 +406,29 @@ pub fn length(tree: Value) Value {
 pub fn split(string: Value, pattern: Value) Value {
     const s = string.string;
     const separator = pattern.string;
-    var items: std.ArrayList(Value) = .empty;
     if (separator.len == 0) return graphemes(string);
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var start: usize = 0;
     while (std.mem.indexOfPos(u8, s, start, separator)) |position| {
-        items.append(allocator, P.stringValue(s[start..position])) catch
+        items.append(scratch, P.copyString(s[start..position])) catch
             @panic("out of memory");
         start = position + separator.len;
     }
-    items.append(allocator, P.stringValue(s[start..])) catch @panic("out of memory");
+    items.append(scratch, P.copyString(s[start..])) catch @panic("out of memory");
     return P.listFromSlice(items.items, P.emptyList());
 }
 
 pub fn string_replace(string: Value, pattern: Value, replacement: Value) Value {
     const replaced = std.mem.replaceOwned(
         u8,
-        allocator,
+        scratch,
         string.string,
         pattern.string,
         replacement.string,
     ) catch @panic("out of memory");
-    return P.stringValue(replaced);
+    defer scratch.free(replaced);
+    return P.copyString(replaced);
 }
 
 // ------------------------------------------------------------------ dict
@@ -429,7 +437,7 @@ pub fn string_replace(string: Value, pattern: Value, replacement: Value) Value {
 // workload notices. "Transient" variants return fresh copies.
 
 pub fn dict_identity(dict: Value) Value {
-    return dict;
+    return P.dup(dict);
 }
 
 pub fn dict_make() Value {
@@ -454,29 +462,30 @@ pub fn dict_has(dict: Value, key: Value) Value {
 pub fn dict_get(dict: Value, key: Value) Value {
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
-        if (P.isEqual(cell.?.head.tuple[0], key)) return ok(cell.?.head.tuple[1]);
+        if (P.isEqual(cell.?.head.tuple[0], key)) return ok(P.dup(cell.?.head.tuple[1]));
     }
     return err(P.NIL);
 }
 
-/// Copy the dict, replacing `key` if present (keeping its position) or
-/// appending the new entry at the end.
+/// Borrows dict, key and value; returns an owned copy of the dict with
+/// `key` replaced (keeping its position) or the new entry appended.
 fn dictPut(dict: Value, key: Value, value: Value) Value {
     var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var replaced = false;
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
         if (P.isEqual(cell.?.head.tuple[0], key)) {
-            items.append(allocator, P.tupleValue(&[_]Value{ key, value })) catch
-                @panic("out of memory");
+            const entry = P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) });
+            items.append(scratch, entry) catch @panic("out of memory");
             replaced = true;
         } else {
-            items.append(allocator, cell.?.head) catch @panic("out of memory");
+            items.append(scratch, P.dup(cell.?.head)) catch @panic("out of memory");
         }
     }
     if (!replaced) {
-        items.append(allocator, P.tupleValue(&[_]Value{ key, value })) catch
-            @panic("out of memory");
+        const entry = P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) });
+        items.append(scratch, entry) catch @panic("out of memory");
     }
     return P.listFromSlice(items.items, P.emptyList());
 }
@@ -491,32 +500,39 @@ pub fn dict_transient_insert(key: Value, value: Value, dict: Value) Value {
 
 pub fn dict_map(dict: Value, fun: Value) Value {
     var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
         const key = cell.?.head.tuple[0];
-        const mapped = P.call2(fun, key, cell.?.head.tuple[1]);
-        items.append(allocator, P.tupleValue(&[_]Value{ key, mapped })) catch
-            @panic("out of memory");
+        const mapped = P.call2(P.dup(fun), P.dup(key), P.dup(cell.?.head.tuple[1]));
+        const entry = P.tupleValue(&[_]Value{ P.dup(key), mapped });
+        items.append(scratch, entry) catch @panic("out of memory");
     }
     return P.listFromSlice(items.items, P.emptyList());
 }
 
 pub fn dict_transient_delete(key: Value, dict: Value) Value {
     var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
         if (!P.isEqual(cell.?.head.tuple[0], key)) {
-            items.append(allocator, cell.?.head) catch @panic("out of memory");
+            items.append(scratch, P.dup(cell.?.head)) catch @panic("out of memory");
         }
     }
     return P.listFromSlice(items.items, P.emptyList());
 }
 
 pub fn dict_fold(dict: Value, initial: Value, fun: Value) Value {
-    var accumulator = initial;
+    var accumulator = P.dup(initial);
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
-        accumulator = P.call3(fun, accumulator, cell.?.head.tuple[0], cell.?.head.tuple[1]);
+        accumulator = P.call3(
+            P.dup(fun),
+            accumulator,
+            P.dup(cell.?.head.tuple[0]),
+            P.dup(cell.?.head.tuple[1]),
+        );
     }
     return accumulator;
 }
@@ -525,7 +541,10 @@ pub fn dict_transient_update_with(key: Value, fun: Value, init: Value, dict: Val
     var cell = dict.list;
     while (cell != null) : (cell = cell.?.tail) {
         if (P.isEqual(cell.?.head.tuple[0], key)) {
-            return dictPut(dict, key, P.call1(fun, cell.?.head.tuple[1]));
+            const updated = P.call1(P.dup(fun), P.dup(cell.?.head.tuple[1]));
+            const result = dictPut(dict, key, updated);
+            P.drop(updated);
+            return result;
         }
     }
     return dictPut(dict, key, init);
