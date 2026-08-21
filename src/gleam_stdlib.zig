@@ -49,7 +49,10 @@ pub fn console_error(string: Value) Value {
 fn doPrint(text: []const u8, newline: bool, to_stderr: bool) void {
     const file = if (to_stderr) std.Io.File.stderr() else std.Io.File.stdout();
     var buffer: [4096]u8 = undefined;
-    var writer = file.writer(io_threaded.io(), &buffer);
+    // writerStreaming, not writer: the positional writer starts at offset
+    // zero on every call, so with stdout redirected to a file each print
+    // would overwrite the previous one.
+    var writer = file.writerStreaming(io_threaded.io(), &buffer);
     writer.interface.writeAll(text) catch {};
     if (newline) writer.interface.writeAll("\n") catch {};
     writer.interface.flush() catch {};
