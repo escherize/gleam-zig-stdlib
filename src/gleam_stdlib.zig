@@ -173,12 +173,19 @@ pub fn floor(x: Value) Value {
     return P.floatValue(@floor(x.float));
 }
 
+/// Saturating float-to-int: NaN maps to 0, out-of-range clamps, instead
+/// of safety panics / UB on valid Gleam calls like float.round(1.0e300).
+fn floatToInt(f: f64) i64 {
+    if (std.math.isNan(f)) return 0;
+    return std.math.lossyCast(i64, f);
+}
+
 pub fn round(x: Value) Value {
-    return P.intValue(@intFromFloat(@round(x.float)));
+    return P.intValue(floatToInt(@round(x.float)));
 }
 
 pub fn truncate(x: Value) Value {
-    return P.intValue(@intFromFloat(@trunc(x.float)));
+    return P.intValue(floatToInt(@trunc(x.float)));
 }
 
 pub fn power(base: Value, exponent: Value) Value {
@@ -187,7 +194,7 @@ pub fn power(base: Value, exponent: Value) Value {
 
 // ponytail: time-seeded xoshiro, not crypto-grade; swap for an OS entropy
 // source if anything security-adjacent ever uses float.random.
-var prng: ?std.Random.DefaultPrng = null;
+threadlocal var prng: ?std.Random.DefaultPrng = null;
 
 pub fn random_uniform() Value {
     if (prng == null) {
