@@ -442,122 +442,383 @@ pub fn string_replace(string: Value, pattern: Value, replacement: Value) Value {
 }
 
 // ------------------------------------------------------------------ dict
-// ponytail: Dict is an insertion-ordered association list (a Value.list of
-// #(key, value) tuples). O(n) operations; swap for a hash map when a real
-// workload notices. "Transient" variants return fresh copies.
+// A hash array mapped trie (HAMT), the structure the JavaScript target
+// uses. Nodes are ordinary reference-counted Values, so the runtime's
+// existing memory discipline covers the whole structure and no new
+// lifetime rules are introduced:
+//
+//   Empty                          the empty dict
+//   Index(bitmap, children)        a sparse node: `bitmap` marks which
+//                                  of 32 slots are present, `children`
+//                                  is a tuple holding only those
+//   Leaf(hash, key, value)         a single entry
+//   Collision(hash, entries)       entries whose full hashes collide,
+//                                  as a tuple of #(key, value) pairs
+//
+// Five bits of hash are consumed per level (32-way branching), so a
+// lookup touches at most 13 nodes for 64-bit hashes and in practice
+// three or four. Structural sharing means an insert copies one node per
+// level, not the whole dict.
+
+const hamt_bits = 5;
+const hamt_width = 1 << hamt_bits; // 32
+const hamt_mask = hamt_width - 1;
+
+fn hamtEmpty() Value {
+    return P.makeRecord("Empty", &[_]Value{});
+}
+
+fn hamtIsEmpty(node: Value) bool {
+    return std.mem.eql(u8, node.record.name, "Empty");
+}
+
+fn hamtFragment(hash: u64, shift: u6) u5 {
+    return @truncate((hash >> shift) & hamt_mask);
+}
+
+/// The position of slot `fragment` within a node's dense child tuple.
+fn hamtOffset(bitmap: u32, fragment: u5) usize {
+    const below: u32 = bitmap & ((@as(u32, 1) << fragment) - 1);
+    return @popCount(below);
+}
+
+fn hamtLeaf(hash: u64, key: Value, value: Value) Value {
+    return P.makeRecord("Leaf", &[_]Value{
+        P.intValue(@bitCast(hash)),
+        key,
+        value,
+    });
+}
+
+fn hamtIndex(bitmap: u32, children: []const Value) Value {
+    return P.makeRecord("Index", &[_]Value{
+        P.intValue(@intCast(bitmap)),
+        P.tupleValue(children),
+    });
+}
+
+fn hamtNodeHash(node: Value) u64 {
+    return @bitCast(node.record.fields[0].int);
+}
+
+/// Two entries whose hashes differ somewhere at or above `shift`: build
+/// the chain of index nodes that separates them. Consumes both nodes.
+fn hamtMerge(shift: u6, left: Value, right: Value) Value {
+    const left_hash = hamtNodeHash(left);
+    const right_hash = hamtNodeHash(right);
+    if (shift >= 64) {
+        // Hashes are identical the whole way down: a collision node.
+        // Both inputs are leaves here (merge is only called on leaves
+        // or collisions, and equal-hash entries never split).
+        return hamtCollisionOf(left, right);
+    }
+    const left_fragment = hamtFragment(left_hash, shift);
+    const right_fragment = hamtFragment(right_hash, shift);
+    if (left_fragment == right_fragment) {
+        const deeper = hamtMerge(shift + hamt_bits, left, right);
+        const bitmap = @as(u32, 1) << left_fragment;
+        return hamtIndex(bitmap, &[_]Value{deeper});
+    }
+    const bitmap = (@as(u32, 1) << left_fragment) | (@as(u32, 1) << right_fragment);
+    return if (left_fragment < right_fragment)
+        hamtIndex(bitmap, &[_]Value{ left, right })
+    else
+        hamtIndex(bitmap, &[_]Value{ right, left });
+}
+
+/// Consumes both leaves.
+fn hamtCollisionOf(left: Value, right: Value) Value {
+    const hash = hamtNodeHash(left);
+    const first = P.tupleValue(&[_]Value{
+        P.dup(left.record.fields[1]),
+        P.dup(left.record.fields[2]),
+    });
+    const second = P.tupleValue(&[_]Value{
+        P.dup(right.record.fields[1]),
+        P.dup(right.record.fields[2]),
+    });
+    P.drop(left);
+    P.drop(right);
+    return P.makeRecord("Collision", &[_]Value{
+        P.intValue(@bitCast(hash)),
+        P.tupleValue(&[_]Value{ first, second }),
+    });
+}
+
+/// Borrows node, key and value; returns an owned node.
+fn hamtInsert(node: Value, shift: u6, hash: u64, key: Value, value: Value) Value {
+    const name = node.record.name;
+    if (std.mem.eql(u8, name, "Empty")) {
+        return hamtLeaf(hash, P.dup(key), P.dup(value));
+    }
+    if (std.mem.eql(u8, name, "Leaf")) {
+        const leaf_hash = hamtNodeHash(node);
+        if (leaf_hash == hash and P.isEqual(node.record.fields[1], key)) {
+            return hamtLeaf(hash, P.dup(key), P.dup(value));
+        }
+        const fresh = hamtLeaf(hash, P.dup(key), P.dup(value));
+        return hamtMerge(shift, P.dup(node), fresh);
+    }
+    if (std.mem.eql(u8, name, "Collision")) {
+        const collision_hash = hamtNodeHash(node);
+        if (collision_hash != hash) {
+            const fresh = hamtLeaf(hash, P.dup(key), P.dup(value));
+            return hamtMerge(shift, P.dup(node), fresh);
+        }
+        const entries = node.record.fields[1].tuple;
+        var items: std.ArrayList(Value) = .empty;
+        defer items.deinit(scratch);
+        var replaced = false;
+        for (entries) |entry| {
+            if (P.isEqual(entry.tuple[0], key)) {
+                items.append(scratch, P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) })) catch
+                    @panic("out of memory");
+                replaced = true;
+            } else {
+                items.append(scratch, P.dup(entry)) catch @panic("out of memory");
+            }
+        }
+        if (!replaced) {
+            items.append(scratch, P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) })) catch
+                @panic("out of memory");
+        }
+        return P.makeRecord("Collision", &[_]Value{
+            P.intValue(@bitCast(hash)),
+            P.tupleValue(items.items),
+        });
+    }
+    // Index node.
+    const bitmap: u32 = @intCast(node.record.fields[0].int);
+    const children = node.record.fields[1].tuple;
+    const fragment = hamtFragment(hash, shift);
+    const bit = @as(u32, 1) << fragment;
+    const offset = hamtOffset(bitmap, fragment);
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
+    if (bitmap & bit != 0) {
+        for (children, 0..) |child, index| {
+            if (index == offset) {
+                items.append(
+                    scratch,
+                    hamtInsert(child, shift + hamt_bits, hash, key, value),
+                ) catch @panic("out of memory");
+            } else {
+                items.append(scratch, P.dup(child)) catch @panic("out of memory");
+            }
+        }
+        return hamtIndex(bitmap, items.items);
+    }
+    // A free slot: splice the new leaf in, keeping slots ordered.
+    for (children, 0..) |child, index| {
+        if (index == offset) {
+            items.append(scratch, hamtLeaf(hash, P.dup(key), P.dup(value))) catch
+                @panic("out of memory");
+        }
+        items.append(scratch, P.dup(child)) catch @panic("out of memory");
+    }
+    if (offset == children.len) {
+        items.append(scratch, hamtLeaf(hash, P.dup(key), P.dup(value))) catch
+            @panic("out of memory");
+    }
+    return hamtIndex(bitmap | bit, items.items);
+}
+
+/// Borrows; returns the entry's value borrowed, or null.
+fn hamtLookup(node: Value, shift: u6, hash: u64, key: Value) ?Value {
+    const name = node.record.name;
+    if (std.mem.eql(u8, name, "Empty")) return null;
+    if (std.mem.eql(u8, name, "Leaf")) {
+        if (hamtNodeHash(node) == hash and P.isEqual(node.record.fields[1], key)) {
+            return node.record.fields[2];
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, name, "Collision")) {
+        if (hamtNodeHash(node) != hash) return null;
+        for (node.record.fields[1].tuple) |entry| {
+            if (P.isEqual(entry.tuple[0], key)) return entry.tuple[1];
+        }
+        return null;
+    }
+    const bitmap: u32 = @intCast(node.record.fields[0].int);
+    const fragment = hamtFragment(hash, shift);
+    const bit = @as(u32, 1) << fragment;
+    if (bitmap & bit == 0) return null;
+    const child = node.record.fields[1].tuple[hamtOffset(bitmap, fragment)];
+    return hamtLookup(child, shift + hamt_bits, hash, key);
+}
+
+/// Borrows node and key; returns an owned node with the entry removed.
+fn hamtDelete(node: Value, shift: u6, hash: u64, key: Value) Value {
+    const name = node.record.name;
+    if (std.mem.eql(u8, name, "Empty")) return hamtEmpty();
+    if (std.mem.eql(u8, name, "Leaf")) {
+        if (hamtNodeHash(node) == hash and P.isEqual(node.record.fields[1], key)) {
+            return hamtEmpty();
+        }
+        return P.dup(node);
+    }
+    if (std.mem.eql(u8, name, "Collision")) {
+        if (hamtNodeHash(node) != hash) return P.dup(node);
+        var items: std.ArrayList(Value) = .empty;
+        defer items.deinit(scratch);
+        for (node.record.fields[1].tuple) |entry| {
+            if (!P.isEqual(entry.tuple[0], key)) {
+                items.append(scratch, P.dup(entry)) catch @panic("out of memory");
+            }
+        }
+        if (items.items.len == 0) return hamtEmpty();
+        if (items.items.len == 1) {
+            const entry = items.items[0];
+            const leaf = hamtLeaf(hash, P.dup(entry.tuple[0]), P.dup(entry.tuple[1]));
+            P.drop(entry);
+            return leaf;
+        }
+        return P.makeRecord("Collision", &[_]Value{
+            P.intValue(@bitCast(hash)),
+            P.tupleValue(items.items),
+        });
+    }
+    const bitmap: u32 = @intCast(node.record.fields[0].int);
+    const children = node.record.fields[1].tuple;
+    const fragment = hamtFragment(hash, shift);
+    const bit = @as(u32, 1) << fragment;
+    if (bitmap & bit == 0) return P.dup(node);
+    const offset = hamtOffset(bitmap, fragment);
+    const updated = hamtDelete(children[offset], shift + hamt_bits, hash, key);
+    var items: std.ArrayList(Value) = .empty;
+    defer items.deinit(scratch);
+    if (hamtIsEmpty(updated)) {
+        P.drop(updated);
+        for (children, 0..) |child, index| {
+            if (index != offset) {
+                items.append(scratch, P.dup(child)) catch @panic("out of memory");
+            }
+        }
+        if (items.items.len == 0) return hamtEmpty();
+        return hamtIndex(bitmap & ~bit, items.items);
+    }
+    for (children, 0..) |child, index| {
+        if (index == offset) {
+            items.append(scratch, updated) catch @panic("out of memory");
+        } else {
+            items.append(scratch, P.dup(child)) catch @panic("out of memory");
+        }
+    }
+    return hamtIndex(bitmap, items.items);
+}
+
+/// Borrows; appends every #(key, value) pair to `out` as owned values.
+fn hamtEntries(node: Value, out: *std.ArrayList(Value)) void {
+    const name = node.record.name;
+    if (std.mem.eql(u8, name, "Empty")) return;
+    if (std.mem.eql(u8, name, "Leaf")) {
+        out.append(scratch, P.tupleValue(&[_]Value{
+            P.dup(node.record.fields[1]),
+            P.dup(node.record.fields[2]),
+        })) catch @panic("out of memory");
+        return;
+    }
+    if (std.mem.eql(u8, name, "Collision")) {
+        for (node.record.fields[1].tuple) |entry| {
+            out.append(scratch, P.dup(entry)) catch @panic("out of memory");
+        }
+        return;
+    }
+    for (node.record.fields[1].tuple) |child| hamtEntries(child, out);
+}
+
+fn hamtCount(node: Value) i64 {
+    const name = node.record.name;
+    if (std.mem.eql(u8, name, "Empty")) return 0;
+    if (std.mem.eql(u8, name, "Leaf")) return 1;
+    if (std.mem.eql(u8, name, "Collision")) {
+        return @intCast(node.record.fields[1].tuple.len);
+    }
+    var total: i64 = 0;
+    for (node.record.fields[1].tuple) |child| total += hamtCount(child);
+    return total;
+}
 
 pub fn dict_identity(dict: Value) Value {
     return P.dup(dict);
 }
 
 pub fn dict_make() Value {
-    return P.emptyList();
+    return hamtEmpty();
 }
 
 pub fn dict_size(dict: Value) Value {
-    var count: i64 = 0;
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) count += 1;
-    return P.intValue(count);
+    return P.intValue(hamtCount(dict));
 }
 
 pub fn dict_has(dict: Value, key: Value) Value {
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        if (P.isEqual(cell.?.head.tuple[0], key)) return P.TRUE;
-    }
-    return P.FALSE;
+    const found = hamtLookup(dict, 0, P.hashValue(key), key);
+    return if (found == null) P.FALSE else P.TRUE;
 }
 
 pub fn dict_get(dict: Value, key: Value) Value {
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        if (P.isEqual(cell.?.head.tuple[0], key)) return ok(P.dup(cell.?.head.tuple[1]));
+    if (hamtLookup(dict, 0, P.hashValue(key), key)) |found| {
+        return ok(P.dup(found));
     }
     return err(P.NIL);
 }
 
-/// Borrows dict, key and value; returns an owned copy of the dict with
-/// `key` replaced (keeping its position) or the new entry appended.
-fn dictPut(dict: Value, key: Value, value: Value) Value {
-    var items: std.ArrayList(Value) = .empty;
-    defer items.deinit(scratch);
-    var replaced = false;
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        if (P.isEqual(cell.?.head.tuple[0], key)) {
-            const entry = P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) });
-            items.append(scratch, entry) catch @panic("out of memory");
-            replaced = true;
-        } else {
-            items.append(scratch, P.dup(cell.?.head)) catch @panic("out of memory");
-        }
-    }
-    if (!replaced) {
-        const entry = P.tupleValue(&[_]Value{ P.dup(key), P.dup(value) });
-        items.append(scratch, entry) catch @panic("out of memory");
-    }
-    return P.listFromSlice(items.items, P.emptyList());
-}
-
 pub fn dict_insert(dict: Value, key: Value, value: Value) Value {
-    return dictPut(dict, key, value);
+    return hamtInsert(dict, 0, P.hashValue(key), key, value);
 }
 
 pub fn dict_transient_insert(key: Value, value: Value, dict: Value) Value {
-    return dictPut(dict, key, value);
+    return hamtInsert(dict, 0, P.hashValue(key), key, value);
 }
 
 pub fn dict_map(dict: Value, fun: Value) Value {
-    var items: std.ArrayList(Value) = .empty;
-    defer items.deinit(scratch);
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        const key = cell.?.head.tuple[0];
-        const mapped = P.call2(P.dup(fun), P.dup(key), P.dup(cell.?.head.tuple[1]));
-        const entry = P.tupleValue(&[_]Value{ P.dup(key), mapped });
-        items.append(scratch, entry) catch @panic("out of memory");
+    var entries: std.ArrayList(Value) = .empty;
+    defer entries.deinit(scratch);
+    hamtEntries(dict, &entries);
+    var result = hamtEmpty();
+    for (entries.items) |entry| {
+        const key = entry.tuple[0];
+        const mapped = P.call2(P.dup(fun), P.dup(key), P.dup(entry.tuple[1]));
+        const next = hamtInsert(result, 0, P.hashValue(key), key, mapped);
+        P.drop(result);
+        P.drop(mapped);
+        P.drop(entry);
+        result = next;
     }
-    return P.listFromSlice(items.items, P.emptyList());
+    return result;
 }
 
 pub fn dict_transient_delete(key: Value, dict: Value) Value {
-    var items: std.ArrayList(Value) = .empty;
-    defer items.deinit(scratch);
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        if (!P.isEqual(cell.?.head.tuple[0], key)) {
-            items.append(scratch, P.dup(cell.?.head)) catch @panic("out of memory");
-        }
-    }
-    return P.listFromSlice(items.items, P.emptyList());
+    return hamtDelete(dict, 0, P.hashValue(key), key);
 }
 
 pub fn dict_fold(dict: Value, initial: Value, fun: Value) Value {
+    var entries: std.ArrayList(Value) = .empty;
+    defer entries.deinit(scratch);
+    hamtEntries(dict, &entries);
     var accumulator = P.dup(initial);
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
+    for (entries.items) |entry| {
         accumulator = P.call3(
             P.dup(fun),
             accumulator,
-            P.dup(cell.?.head.tuple[0]),
-            P.dup(cell.?.head.tuple[1]),
+            P.dup(entry.tuple[0]),
+            P.dup(entry.tuple[1]),
         );
+        P.drop(entry);
     }
     return accumulator;
 }
 
 pub fn dict_transient_update_with(key: Value, fun: Value, init: Value, dict: Value) Value {
-    var cell = dict.list;
-    while (cell != null) : (cell = cell.?.tail) {
-        if (P.isEqual(cell.?.head.tuple[0], key)) {
-            const updated = P.call1(P.dup(fun), P.dup(cell.?.head.tuple[1]));
-            const result = dictPut(dict, key, updated);
-            P.drop(updated);
-            return result;
-        }
+    const hash = P.hashValue(key);
+    if (hamtLookup(dict, 0, hash, key)) |found| {
+        const updated = P.call1(P.dup(fun), P.dup(found));
+        const result = hamtInsert(dict, 0, hash, key, updated);
+        P.drop(updated);
+        return result;
     }
-    return dictPut(dict, key, init);
+    return hamtInsert(dict, 0, hash, key, init);
 }
 
 // ------------------------------------------------------------------ bit_array
